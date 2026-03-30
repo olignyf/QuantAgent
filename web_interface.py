@@ -21,7 +21,6 @@ class WebTradingAnalyzer:
     def __init__(self):
         """Initialize the web trading analyzer."""
         from default_config import DEFAULT_CONFIG
-        # Start with default config (OpenAI)
         self.config = DEFAULT_CONFIG.copy()
         self.trading_graph = TradingGraph(config=self.config)
         self.data_dir = Path("data")
@@ -327,6 +326,8 @@ class WebTradingAnalyzer:
                 provider_name = "OpenAI"
             elif provider == "anthropic":
                 provider_name = "Anthropic"
+            elif provider == "ollama":
+                provider_name = "Ollama"
             else:
                 provider_name = "Qwen"
 
@@ -526,6 +527,19 @@ class WebTradingAnalyzer:
                 )
                 
                 provider_name = "Anthropic"
+            elif provider == "ollama":
+                base_url = self.config.get("ollama_base_url", "http://localhost:11434/v1")
+                api_key = os.environ.get("OLLAMA_API_KEY") or self.config.get(
+                    "ollama_api_key", "ollama"
+                )
+                model = self.config.get("agent_llm_model", "qwen3.5:9b-150k")
+                client = OpenAI(api_key=api_key, base_url=base_url)
+                _ = client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": "Hello"}],
+                    max_tokens=5,
+                )
+                provider_name = "Ollama"
             else:  # qwen
                 from langchain_qwq import ChatQwen
                 api_key = os.environ.get("DASHSCOPE_API_KEY") or self.config.get("qwen_api_key", "")
@@ -552,6 +566,8 @@ class WebTradingAnalyzer:
                 provider_name = "OpenAI"
             elif provider == "anthropic":
                 provider_name = "Anthropic"
+            elif provider == "ollama":
+                provider_name = "Ollama"
             else:
                 provider_name = "Qwen"
 
@@ -870,8 +886,10 @@ def update_provider():
         data = request.get_json()
         provider = data.get("provider", "openai")
 
-        if provider not in ["openai", "anthropic", "qwen"]:
-            return jsonify({"error": "Provider must be 'openai', 'anthropic', or 'qwen'"})
+        if provider not in ["openai", "anthropic", "qwen", "ollama"]:
+            return jsonify(
+                {"error": "Provider must be 'openai', 'anthropic', 'qwen', or 'ollama'"}
+            )
 
         print(f"Updating provider to: {provider}")
 
@@ -889,17 +907,23 @@ def update_provider():
             if not analyzer.config["graph_llm_model"].startswith("claude"):
                 analyzer.config["graph_llm_model"] = "claude-haiku-4-5-20251001"
         elif provider == "qwen":
-            # Set default Qwen models if not already set to Qwen models
-            if not analyzer.config["agent_llm_model"].startswith("qwen"):
+            # Ollama Qwen tags contain ':'; cloud DashScope models do not
+            am = str(analyzer.config["agent_llm_model"])
+            gm = str(analyzer.config["graph_llm_model"])
+            if (not am.startswith("qwen")) or (":" in am):
                 analyzer.config["agent_llm_model"] = "qwen3-max"
-            if not analyzer.config["graph_llm_model"].startswith("qwen"):
+            if (not gm.startswith("qwen")) or (":" in gm):
                 analyzer.config["graph_llm_model"] = "qwen3-vl-plus"
-            
+        elif provider == "ollama":
+            analyzer.config["agent_llm_model"] = "qwen3.5:9b-150k"
+            analyzer.config["graph_llm_model"] = "qwen3.5:9b-150k"
         else:
             # Set default OpenAI models if not already set to OpenAI models
-            if analyzer.config["agent_llm_model"].startswith(("claude", "qwen")):
+            am = str(analyzer.config["agent_llm_model"])
+            gm = str(analyzer.config["graph_llm_model"])
+            if am.startswith(("claude", "qwen")) or ":" in am:
                 analyzer.config["agent_llm_model"] = "gpt-4o-mini"
-            if analyzer.config["graph_llm_model"].startswith(("claude", "qwen")):
+            if gm.startswith(("claude", "qwen")) or ":" in gm:
                 analyzer.config["graph_llm_model"] = "gpt-4o"
         
         analyzer.trading_graph.config.update(analyzer.config)
@@ -928,8 +952,10 @@ def update_api_key():
         if not new_api_key:
             return jsonify({"error": "API key is required"})
 
-        if provider not in ["openai", "anthropic", "qwen"]:
-            return jsonify({"error": "Provider must be 'openai', 'anthropic', or 'qwen'"})
+        if provider not in ["openai", "anthropic", "qwen", "ollama"]:
+            return jsonify(
+                {"error": "Provider must be 'openai', 'anthropic', 'qwen', or 'ollama'"}
+            )
 
         print(f"Updating {provider} API key to: {new_api_key[:8]}...{new_api_key[-4:]}")
 
@@ -940,6 +966,8 @@ def update_api_key():
             os.environ["ANTHROPIC_API_KEY"] = new_api_key
         elif provider == "qwen":
             os.environ["DASHSCOPE_API_KEY"] = new_api_key
+        elif provider == "ollama":
+            os.environ["OLLAMA_API_KEY"] = new_api_key
 
         # Update the API key in the trading graph
         analyzer.trading_graph.update_api_key(new_api_key, provider=provider)
@@ -974,6 +1002,16 @@ def get_api_key_status():
             # Fallback to config if not in environment
             if not api_key and hasattr(analyzer, 'config'):
                 api_key = analyzer.config.get("qwen_api_key", "")
+        elif provider == "ollama":
+            api_key = os.environ.get("OLLAMA_API_KEY", "")
+            if not api_key and hasattr(analyzer, "config"):
+                api_key = analyzer.config.get("ollama_api_key", "ollama")
+            if not api_key:
+                api_key = "ollama"
+            masked_key = (
+                api_key[:3] + "..." + api_key[-3:] if len(api_key) > 12 else "***"
+            )
+            return jsonify({"has_key": True, "masked_key": masked_key})
         else:
             api_key = ""
         

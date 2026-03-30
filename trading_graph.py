@@ -59,7 +59,7 @@ class TradingGraph:
         Get API key with proper validation and error handling.
         
         Args:
-            provider: The provider name ("openai", "anthropic", or "qwen")
+            provider: The provider name ("openai", "anthropic", "qwen", or "ollama")
         
         Returns:
             str: The API key for the specified provider
@@ -131,8 +131,16 @@ class TradingGraph:
                     "Please provide your actual Qwen API key. "
                     "You can get one from: https://dashscope.console.aliyun.com/"
                 )
+        elif provider == "ollama":
+            api_key = self.config.get("ollama_api_key")
+            if not api_key:
+                api_key = os.environ.get("OLLAMA_API_KEY")
+            if not api_key:
+                api_key = "ollama"
         else:
-            raise ValueError(f"Unsupported provider: {provider}. Must be 'openai', 'anthropic', or 'qwen'")
+            raise ValueError(
+                f"Unsupported provider: {provider}. Must be 'openai', 'anthropic', 'qwen', or 'ollama'"
+            )
         
         return api_key
 
@@ -143,7 +151,7 @@ class TradingGraph:
         Create an LLM instance based on the provider.
         
         Args:
-            provider: The provider name ("openai", "anthropic", or "qwen")
+            provider: The provider name ("openai", "anthropic", "qwen", or "ollama")
             model: The model name (e.g., "gpt-4o", "claude-3-5-sonnet-20241022", "qwen-vl-max-latest")
             temperature: The temperature setting for the model
             
@@ -174,8 +182,18 @@ class TradingGraph:
                 api_key=api_key,
                 max_retries=4,
             )
+        elif provider == "ollama":
+            base_url = self.config.get("ollama_base_url", "http://localhost:11434/v1")
+            return ChatOpenAI(
+                model=model,
+                temperature=temperature,
+                api_key=api_key,
+                base_url=base_url,
+            )
         else:
-            raise ValueError(f"Unsupported provider: {provider}. Must be 'openai', 'anthropic', or 'qwen'")
+            raise ValueError(
+                f"Unsupported provider: {provider}. Must be 'openai', 'anthropic', 'qwen', or 'ollama'"
+            )
 
     # def _set_tool_nodes(self) -> Dict[str, ToolNode]:
     #     """
@@ -254,8 +272,13 @@ class TradingGraph:
             
             # Also update the environment variable for consistency
             os.environ["DASHSCOPE_API_KEY"] = api_key
+        elif provider == "ollama":
+            self.config["ollama_api_key"] = api_key
+            os.environ["OLLAMA_API_KEY"] = api_key
         else:
-            raise ValueError(f"Unsupported provider: {provider}. Must be 'openai', 'anthropic', or 'qwen'")
+            raise ValueError(
+                f"Unsupported provider: {provider}. Must be 'openai', 'anthropic', 'qwen', or 'ollama'"
+            )
         
         # Refresh the LLMs with the new API key
         self.refresh_llms()
