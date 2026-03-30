@@ -2,7 +2,7 @@ import json
 import os
 import re
 import urllib.parse
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict
 
@@ -24,9 +24,11 @@ class WebTradingAnalyzer:
         self.config = DEFAULT_CONFIG.copy()
         self.trading_graph = TradingGraph(config=self.config)
         self.data_dir = Path("data")
+        self.cache_dir = Path("cache")
 
         # Ensure data dir exists
         self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
 
         # Available assets and their display names
         self.asset_mapping = {
@@ -137,6 +139,205 @@ class WebTradingAnalyzer:
             print(f"Error fetching data for {symbol}: {e}")
             return pd.DataFrame()
 
+    def _normalize_yfinance_df(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Normalize yfinance output into a consistent OHLC DataFrame."""
+        empty_df = pd.DataFrame(columns=["Datetime", "Open", "High", "Low", "Close"])
+        if df is None or df.empty:
+            return empty_df
+
+        if isinstance(df, pd.Series):
+            df = df.to_frame()
+
+        df = df.reset_index()
+
+        if not isinstance(df, pd.DataFrame):
+            return empty_df
+
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+
+        column_mapping = {
+            "Date": "Datetime",
+            "Open": "Open",
+            "High": "High",
+            "Low": "Low",
+            "Close": "Close",
+            "Volume": "Volume",
+        }
+        existing_columns = {old: new for old, new in column_mapping.items() if old in df.columns}
+        df = df.rename(columns=existing_columns)
+
+        required_columns = ["Datetime", "Open", "High", "Low", "Close"]
+        if not all(col in df.columns for col in required_columns):
+            print(f"Warning: Missing columns. Available: {list(df.columns)}")
+            return empty_df
+
+        df = df[required_columns].copy()
+        df["Datetime"] = self._to_naive_datetime_series(df["Datetime"])
+        df = df.sort_values("Datetime").drop_duplicates(subset=["Datetime"]).reset_index(drop=True)
+        return df
+
+    def _to_naive_datetime_series(self, dt_series: pd.Series) -> pd.Series:
+        """Convert timezone-aware datetime values into naive datetimes consistently."""
+        parsed = pd.to_datetime(dt_series, errors="coerce")
+        # pd.to_datetime may return either Series or DatetimeIndex depending on input type.
+        if isinstance(parsed, pd.DatetimeIndex):
+            if parsed.tz is not None:
+                parsed = parsed.tz_convert("UTC").tz_localize(None)
+            return pd.Series(parsed)
+
+        try:
+            if hasattr(parsed, "dt") and getattr(parsed.dt, "tz", None) is not None:
+                parsed = parsed.dt.tz_convert("UTC").dt.tz_localize(None)
+            return parsed
+        except Exception:
+            # Fallback for mixed values; normalize element-wise.
+            normalized = pd.Series(parsed).apply(
+                lambda x: (
+                    x.tz_convert("UTC").tz_localize(None)
+                    if pd.notna(x) and getattr(x, "tzinfo", None) is not None
+                    else x
+                )
+            )
+            return pd.to_datetime(normalized, errors="coerce")
+
+    def _to_naive_datetime(self, dt: datetime) -> datetime:
+        if dt.tzinfo is not None:
+            return dt.astimezone().replace(tzinfo=None)
+        return dt
+
+    def _cache_key_symbol(self, symbol: str) -> str:
+        return re.sub(r"[^A-Za-z0-9_.-]+", "_", symbol)
+
+    def _cache_file_path(self, symbol: str, interval: str, day: date) -> Path:
+        safe_symbol = self._cache_key_symbol(symbol)
+        return self.cache_dir / f"{safe_symbol}_{interval}_{day.isoformat()}.csv"
+
+    def _cache_meta_path(self, symbol: str, interval: str, day: date) -> Path:
+        safe_symbol = self._cache_key_symbol(symbol)
+        return self.cache_dir / f"{safe_symbol}_{interval}_{day.isoformat()}.meta.json"
+
+    def _read_day_cache(self, symbol: str, interval: str, day: date) -> pd.DataFrame:
+        empty_df = pd.DataFrame(columns=["Datetime", "Open", "High", "Low", "Close"])
+        path = self._cache_file_path(symbol, interval, day)
+        if not path.exists():
+            return empty_df
+        try:
+            df = pd.read_csv(path)
+            if df.empty:
+                return empty_df
+            if "Datetime" not in df.columns:
+                return empty_df
+            df["Datetime"] = self._to_naive_datetime_series(df["Datetime"])
+            return (
+                df[["Datetime", "Open", "High", "Low", "Close"]]
+                .sort_values("Datetime")
+                .drop_duplicates(subset=["Datetime"])
+                .reset_index(drop=True)
+            )
+        except Exception as e:
+            print(f"Error reading cache file {path}: {e}")
+            return empty_df
+
+    def _write_day_cache(self, symbol: str, interval: str, day: date, df: pd.DataFrame) -> None:
+        if df is None or df.empty:
+            return
+        path = self._cache_file_path(symbol, interval, day)
+        out = (
+            df[["Datetime", "Open", "High", "Low", "Close"]]
+            .copy()
+            .sort_values("Datetime")
+            .drop_duplicates(subset=["Datetime"])
+        )
+        out.to_csv(path, index=False, date_format="%Y-%m-%d %H:%M:%S")
+
+    def _load_covered_ranges(self, symbol: str, interval: str, day: date) -> list[tuple[datetime, datetime]]:
+        meta_path = self._cache_meta_path(symbol, interval, day)
+        if not meta_path.exists():
+            return []
+        try:
+            with open(meta_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            raw_ranges = data.get("covered_ranges", [])
+            ranges = []
+            for item in raw_ranges:
+                if not isinstance(item, list) or len(item) != 2:
+                    continue
+                start_dt = self._to_naive_datetime(datetime.fromisoformat(item[0]))
+                end_dt = self._to_naive_datetime(datetime.fromisoformat(item[1]))
+                if end_dt > start_dt:
+                    ranges.append((start_dt, end_dt))
+            return self._merge_ranges(ranges)
+        except Exception as e:
+            print(f"Error reading cache metadata {meta_path}: {e}")
+            return []
+
+    def _save_covered_ranges(
+        self, symbol: str, interval: str, day: date, ranges: list[tuple[datetime, datetime]]
+    ) -> None:
+        meta_path = self._cache_meta_path(symbol, interval, day)
+        merged = self._merge_ranges(ranges)
+        payload = {
+            "symbol": symbol,
+            "interval": interval,
+            "day": day.isoformat(),
+            "covered_ranges": [[s.isoformat(), e.isoformat()] for s, e in merged],
+        }
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+
+    def _merge_ranges(self, ranges: list[tuple[datetime, datetime]]) -> list[tuple[datetime, datetime]]:
+        if not ranges:
+            return []
+        normalized = sorted(ranges, key=lambda x: x[0])
+        merged = [normalized[0]]
+        for start_dt, end_dt in normalized[1:]:
+            last_start, last_end = merged[-1]
+            if start_dt <= last_end:
+                merged[-1] = (last_start, max(last_end, end_dt))
+            else:
+                merged.append((start_dt, end_dt))
+        return merged
+
+    def _missing_ranges(
+        self,
+        requested_start: datetime,
+        requested_end: datetime,
+        covered_ranges: list[tuple[datetime, datetime]],
+    ) -> list[tuple[datetime, datetime]]:
+        if requested_end <= requested_start:
+            return []
+        if not covered_ranges:
+            return [(requested_start, requested_end)]
+
+        merged = self._merge_ranges(covered_ranges)
+        missing = []
+        cursor = requested_start
+        for cov_start, cov_end in merged:
+            if cov_end <= cursor:
+                continue
+            if cov_start > cursor:
+                missing.append((cursor, min(cov_start, requested_end)))
+            cursor = max(cursor, cov_end)
+            if cursor >= requested_end:
+                break
+        if cursor < requested_end:
+            missing.append((cursor, requested_end))
+        return [(s, e) for s, e in missing if e > s]
+
+    def _download_yfinance_range(
+        self, yf_symbol: str, yf_interval: str, start_datetime: datetime, end_datetime: datetime
+    ) -> pd.DataFrame:
+        df = yf.download(
+            tickers=yf_symbol,
+            start=start_datetime,
+            end=end_datetime,
+            interval=yf_interval,
+            auto_adjust=True,
+            prepost=True,
+        )
+        return self._normalize_yfinance_df(df)
+
     def fetch_yfinance_data_with_datetime(
         self,
         symbol: str,
@@ -144,74 +345,92 @@ class WebTradingAnalyzer:
         start_datetime: datetime,
         end_datetime: datetime,
     ) -> pd.DataFrame:
-        """Fetch OHLCV data from Yahoo Finance using datetime objects for exact time precision."""
+        """Fetch OHLCV data from Yahoo Finance with day-sliced local cache support."""
         try:
+            start_datetime = self._to_naive_datetime(start_datetime)
+            end_datetime = self._to_naive_datetime(end_datetime)
             yf_symbol = self.yfinance_symbols.get(symbol, symbol)
             yf_interval = self.yfinance_intervals.get(interval, interval)
 
             print(
                 f"Fetching {yf_symbol} from {start_datetime} to {end_datetime} with interval {yf_interval}"
             )
+            all_frames = []
+            start_day = start_datetime.date()
+            end_day = end_datetime.date()
 
-            # Use datetime objects directly for yfinance
-            df = yf.download(
-                tickers=yf_symbol,
-                start=start_datetime,
-                end=end_datetime,
-                interval=yf_interval,
-                auto_adjust=True,
-                prepost=False,
-            )
+            day_cursor = start_day
+            while day_cursor <= end_day:
+                day_start = datetime.combine(day_cursor, datetime.min.time())
+                next_day_start = day_start + timedelta(days=1)
+                request_start = max(start_datetime, day_start)
+                request_end = min(end_datetime, next_day_start)
 
-            if df is None or df.empty:
+                if request_end <= request_start:
+                    day_cursor += timedelta(days=1)
+                    continue
+
+                cached_df = self._read_day_cache(yf_symbol, yf_interval, day_cursor)
+                covered_ranges = self._load_covered_ranges(yf_symbol, yf_interval, day_cursor)
+                missing_ranges = self._missing_ranges(request_start, request_end, covered_ranges)
+                print(
+                    f"[cache-debug] {yf_symbol} {yf_interval} {day_cursor}: "
+                    f"cached_rows={len(cached_df)} covered={len(covered_ranges)} missing={len(missing_ranges)} "
+                    f"window={request_start} -> {request_end}"
+                )
+
+                for missing_start, missing_end in missing_ranges:
+                    fetched_df = self._download_yfinance_range(
+                        yf_symbol=yf_symbol,
+                        yf_interval=yf_interval,
+                        start_datetime=missing_start,
+                        end_datetime=missing_end,
+                    )
+                    if fetched_df is not None and not fetched_df.empty:
+                        print(
+                            f"[cache-debug] fetched {len(fetched_df)} rows for {day_cursor} "
+                            f"range {missing_start} -> {missing_end}, "
+                            f"rows {fetched_df['Datetime'].min()} -> {fetched_df['Datetime'].max()}"
+                        )
+                        cached_df = pd.concat([cached_df, fetched_df], ignore_index=True)
+                        cached_df = (
+                            cached_df.sort_values("Datetime")
+                            .drop_duplicates(subset=["Datetime"])
+                            .reset_index(drop=True)
+                        )
+                    else:
+                        print(
+                            f"[cache-debug] fetched 0 rows for {day_cursor} "
+                            f"range {missing_start} -> {missing_end}"
+                        )
+                    covered_ranges.append((missing_start, missing_end))
+
+                if cached_df is not None and not cached_df.empty:
+                    self._write_day_cache(yf_symbol, yf_interval, day_cursor, cached_df)
+                self._save_covered_ranges(yf_symbol, yf_interval, day_cursor, covered_ranges)
+
+                if "Datetime" in cached_df.columns and not cached_df.empty:
+                    day_slice = cached_df[
+                        (cached_df["Datetime"] >= request_start) & (cached_df["Datetime"] < request_end)
+                    ]
+                    if not day_slice.empty:
+                        all_frames.append(day_slice)
+
+                day_cursor += timedelta(days=1)
+
+            if not all_frames:
                 print(f"No data returned for {symbol}")
                 return pd.DataFrame()
 
-            # Ensure df is a DataFrame, not a Series
-            if isinstance(df, pd.Series):
-                df = df.to_frame()
-
-            # Reset index to ensure we have a clean DataFrame
-            df = df.reset_index()
-
-            # Ensure we have a DataFrame
-            if not isinstance(df, pd.DataFrame):
-                return pd.DataFrame()
-
-            # Handle potential MultiIndex columns
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-
-            # Rename columns if needed
-            column_mapping = {
-                "Date": "Datetime",
-                "Open": "Open",
-                "High": "High",
-                "Low": "Low",
-                "Close": "Close",
-                "Volume": "Volume",
-            }
-
-            # Only rename columns that exist
-            existing_columns = {
-                old: new for old, new in column_mapping.items() if old in df.columns
-            }
-            df = df.rename(columns=existing_columns)
-
-            # Ensure we have the required columns
-            required_columns = ["Datetime", "Open", "High", "Low", "Close"]
-            if not all(col in df.columns for col in required_columns):
-                print(f"Warning: Missing columns. Available: {list(df.columns)}")
-                return pd.DataFrame()
-
-            # Select only the required columns
-            df = df[required_columns]
-            df["Datetime"] = pd.to_datetime(df["Datetime"])
-
-            print(f"Successfully fetched {len(df)} data points for {symbol}")
-            print(f"Date range: {df['Datetime'].min()} to {df['Datetime'].max()}")
-
-            return df
+            merged = (
+                pd.concat(all_frames, ignore_index=True)
+                .sort_values("Datetime")
+                .drop_duplicates(subset=["Datetime"])
+                .reset_index(drop=True)
+            )
+            print(f"Successfully loaded {len(merged)} data points for {symbol}")
+            print(f"Date range: {merged['Datetime'].min()} to {merged['Datetime'].max()}")
+            return merged
 
         except Exception as e:
             print(f"Error fetching data for {symbol}: {e}")
@@ -268,10 +487,9 @@ class WebTradingAnalyzer:
             df_slice_dict = {}
             for col in required_columns:
                 if col == "Datetime":
-                    # Convert datetime objects to strings for JSON serialization
-                    df_slice_dict[col] = (
-                        df_slice[col].dt.strftime("%Y-%m-%d %H:%M:%S").tolist()
-                    )
+                    # Convert to datetime safely before string formatting.
+                    dt_series = self._to_naive_datetime_series(df_slice[col])
+                    df_slice_dict[col] = dt_series.dt.strftime("%Y-%m-%d %H:%M:%S").tolist()
                 else:
                     df_slice_dict[col] = df_slice[col].tolist()
 
