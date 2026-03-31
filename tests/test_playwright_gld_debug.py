@@ -5,8 +5,9 @@ from datetime import datetime, timedelta
 
 
 try:
-    from playwright.sync_api import sync_playwright
+    from playwright.sync_api import expect, sync_playwright
 except ImportError:  # pragma: no cover
+    expect = None
     sync_playwright = None
 
 
@@ -19,6 +20,10 @@ class TestGLDFlowDebug(unittest.TestCase):
         selected_timeframe = os.environ.get("QUANTAGENT_TEST_TIMEFRAME", "5m")
         selected_asset = os.environ.get("QUANTAGENT_TEST_ASSET", "GLD")
         timeout_ms = int(os.environ.get("QUANTAGENT_TEST_TIMEOUT_MS", "90000"))
+        # /api/analyze waits for Yahoo + full multi-agent LLM run; default 10 minutes.
+        analyze_timeout_ms = int(
+            os.environ.get("QUANTAGENT_ANALYZE_TIMEOUT_MS", "180000")
+        )
 
         # Keep dates deterministic but configurable.
         end_dt = datetime.now()
@@ -27,6 +32,12 @@ class TestGLDFlowDebug(unittest.TestCase):
         end_date = os.environ.get("QUANTAGENT_TEST_END_DATE", end_dt.strftime("%Y-%m-%d"))
         start_time = os.environ.get("QUANTAGENT_TEST_START_TIME", "00:00")
         end_time = os.environ.get("QUANTAGENT_TEST_END_TIME", "23:59")
+        # If false, keep UI default "use current date & time for end" (avoids end > now).
+        explicit_end = os.environ.get("QUANTAGENT_EXPLICIT_END", "").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
 
         debug_lines = []
         dialog_messages = []
@@ -64,7 +75,11 @@ class TestGLDFlowDebug(unittest.TestCase):
             log(f"navigating to {base_url}/demo")
             page.goto(f"{base_url}/demo", wait_until="networkidle", timeout=timeout_ms)
 
-            # Select asset.
+            # Select asset (custom assets load async via /api/custom-assets).
+            page.wait_for_selector(
+                f".asset-btn[data-asset='{selected_asset}']",
+                timeout=timeout_ms,
+            )
             asset_btn = page.locator(f".asset-btn[data-asset='{selected_asset}']")
             self.assertTrue(asset_btn.count() > 0, f"Asset button not found: {selected_asset}")
             asset_btn.first.click()
@@ -78,21 +93,34 @@ class TestGLDFlowDebug(unittest.TestCase):
             tf_btn.first.click()
             log(f"selected timeframe={selected_timeframe}")
 
-            # Set explicit date/time inputs.
+            use_current = page.locator("#useCurrentTime")
             page.fill("#startDate", start_date)
-            page.fill("#endDate", end_date)
             page.fill("#startTime", start_time)
-            page.fill("#endTime", end_time)
-            log(
-                f"date range start={start_date} {start_time}, end={end_date} {end_time}"
-            )
+
+            if explicit_end:
+                # Must be strictly <= server now or /api/analyze rejects the request.
+                if use_current.is_checked():
+                    use_current.uncheck()
+                    log("unchecked #useCurrentTime (QUANTAGENT_EXPLICIT_END set)")
+                expect(page.locator("#endDate")).not_to_be_disabled(timeout=timeout_ms)
+                expect(page.locator("#endTime")).not_to_be_disabled(timeout=timeout_ms)
+                page.fill("#endDate", end_date)
+                page.fill("#endTime", end_time)
+                log(
+                    f"date range start={start_date} {start_time}, end={end_date} {end_time} (explicit)"
+                )
+            else:
+                if not use_current.is_checked():
+                    use_current.check()
+                    log("checked #useCurrentTime — end uses server now")
+                log(f"date range start={start_date} {start_time}, end=current (server)")
 
             analyze_btn = page.locator("#analyzeBtn")
             self.assertTrue(analyze_btn.count() > 0, "Analyze button not found")
 
             # Click analyze and wait for backend call.
             with page.expect_response(
-                lambda r: "/api/analyze" in r.url, timeout=timeout_ms
+                lambda r: "/api/analyze" in r.url, timeout=analyze_timeout_ms
             ) as analyze_resp_info:
                 analyze_btn.click()
 
@@ -100,6 +128,21 @@ class TestGLDFlowDebug(unittest.TestCase):
             body_text = analyze_resp.text()
             log(f"/api/analyze status={analyze_resp.status}")
             log(f"/api/analyze body={body_text[:1200]}")
+            try:
+                payload = analyze_resp.json()
+                if isinstance(payload, dict):
+                    if payload.get("smoke"):
+                        self.assertTrue(
+                            payload.get("success"),
+                            f"smoke response missing success: {payload}",
+                        )
+                    elif payload.get("error"):
+                        self.fail(
+                            f"/api/analyze returned error: {payload.get('error')}\n\n"
+                            + "\n".join(debug_lines)
+                        )
+            except Exception:
+                pass
 
             # Grab visible status text if present.
             status_text = ""

@@ -8,16 +8,14 @@ set -euo pipefail
 #
 # Optional env vars:
 #   CONDA_ENV=quantagents
-#   BASE_URL=http://127.0.0.1:5000
-#   SERVER_PORT=5000
 #   SERVER_HOST=127.0.0.1
+#   QUANTAGENT_PORT=5000          # if unset, an ephemeral free port is chosen
 #   TEST_FILE=tests/test_playwright_gld_debug.py
 #   STARTUP_TIMEOUT_SEC=60
+#   SERVER_LOG=server_playwright_debug.log
 
 CONDA_ENV="${CONDA_ENV:-quantagents}"
 SERVER_HOST="${SERVER_HOST:-127.0.0.1}"
-SERVER_PORT="${SERVER_PORT:-5000}"
-BASE_URL="${BASE_URL:-http://${SERVER_HOST}:${SERVER_PORT}}"
 TEST_FILE="${TEST_FILE:-tests/test_playwright_gld_debug.py}"
 STARTUP_TIMEOUT_SEC="${STARTUP_TIMEOUT_SEC:-60}"
 SERVER_LOG="${SERVER_LOG:-server_playwright_debug.log}"
@@ -32,8 +30,18 @@ if [[ ! -f "$TEST_FILE" ]]; then
   exit 1
 fi
 
-echo "[runner] Starting server in conda env '${CONDA_ENV}'..."
-conda run -n "$CONDA_ENV" --no-capture-output python web_interface.py >"$SERVER_LOG" 2>&1 &
+# Prefer explicit port; otherwise bind an ephemeral port (avoids stale :5000).
+if [[ -z "${QUANTAGENT_PORT:-}" ]]; then
+  QUANTAGENT_PORT="$(python3 -c "import socket; s=socket.socket(); s.bind(('127.0.0.1',0)); print(s.getsockname()[1]); s.close()")"
+fi
+export QUANTAGENT_PORT
+BASE_URL="http://${SERVER_HOST}:${QUANTAGENT_PORT}"
+
+echo "[runner] Starting server in conda env '${CONDA_ENV}' on port ${QUANTAGENT_PORT}..."
+: >"$SERVER_LOG"
+conda run -n "$CONDA_ENV" --no-capture-output \
+  env QUANTAGENT_SMOKE_ANALYZE=1 "QUANTAGENT_PORT=${QUANTAGENT_PORT}" \
+  python web_interface.py >>"$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
 
 cleanup() {
@@ -44,6 +52,13 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+
+sleep 1
+if grep -q "Address already in use" "$SERVER_LOG" 2>/dev/null; then
+  echo "ERROR: port ${QUANTAGENT_PORT} is already in use. Set QUANTAGENT_PORT to a free port." >&2
+  tail -n 40 "$SERVER_LOG" >&2 || true
+  exit 1
+fi
 
 echo "[runner] Waiting for ${BASE_URL}/demo (timeout ${STARTUP_TIMEOUT_SEC}s)..."
 start_ts="$(date +%s)"

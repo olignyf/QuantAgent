@@ -1691,6 +1691,12 @@
              })
              .then(response => response.json())
             .then(data => {
+                if (data.smoke) {
+                    console.log('Smoke analyze OK:', data);
+                    analyzeBtn.innerHTML = originalText;
+                    analyzeBtn.disabled = false;
+                    return;
+                }
                 if (data.redirect) {
                     // Store full results (with images) in sessionStorage before redirect
                     if (data.full_results) {

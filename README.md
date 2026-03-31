@@ -57,7 +57,7 @@ A sophisticated multi-agent trading analysis system that combines technical indi
 
 <div align="center">
 
-🚀 [Features](#-features) | ⚡ [Installation](#-installation) | 🎬 [Usage](#-usage) | 🔧 [Implementation Details](#-implementation-details) | 🤝 [Contributing](#-contributing) | 📄 [License](#-license)
+🚀 [Features](#-features) | ⚡ [Installation](#-installation) | 🎬 [Usage](#-usage) | 🧪 [UI smoke test (Playwright)](#-ui-smoke-test-playwright) | 🔧 [Implementation Details](#-implementation-details) | 🤝 [Contributing](#-contributing) | 📄 [License](#-license)
 
 </div>
 
@@ -146,8 +146,8 @@ export DASHSCOPE_API_KEY="your_dashscope_api_key_here"
 ## 🚀 Usage
 
 ### Start the Web Interface
-
 ```bash
+conda activate quantagents
 python web_interface.py
 ```
 
@@ -164,6 +164,50 @@ The web application will be available at `http://127.0.0.1:5000`
 ## 📺 Demo
 
 ![Quick preview](assets/demo.gif)
+
+
+## 🧪 UI smoke test (Playwright)
+
+There is an automated UI check that opens `/demo`, selects an asset and timeframe, and exercises the live Yahoo Finance path via `POST /api/analyze`.
+
+### One-command runner (Conda + ephemeral port)
+
+From the repo root, with [Conda](https://docs.conda.io/) available on your `PATH` (and env `quantagents` created per [Installation](#-installation)):
+
+```bash
+bash scripts/run_playwright_debug.sh
+```
+
+The script:
+
+- Starts `web_interface.py` inside `conda run -n quantagents` (override with `CONDA_ENV`).
+- Sets **`QUANTAGENT_SMOKE_ANALYZE=1`** so `/api/analyze` returns immediately after a successful data fetch (no multi-agent LLM run). This keeps the test fast and avoids needing API keys or a local model for CI-style checks.
+- Picks a **free TCP port** via `QUANTAGENT_PORT` when unset, so it does not collide with another process already bound to port 5000. To pin a port: `QUANTAGENT_PORT=5010 bash scripts/run_playwright_debug.sh`.
+- Installs **Playwright** into that Conda env if missing (`pip install playwright` and `playwright install chromium`).
+- Runs `tests/test_playwright_gld_debug.py` against `QUANTAGENT_BASE_URL` (set automatically).
+
+Server logs from the run are appended to `server_playwright_debug.log` by default (`SERVER_LOG`).
+
+### Run the test against an existing server
+
+```bash
+conda activate quantagents
+pip install playwright
+playwright install chromium
+export QUANTAGENT_BASE_URL=http://127.0.0.1:5000
+python tests/test_playwright_gld_debug.py
+```
+
+### Useful environment variables
+
+| Variable | Purpose |
+|----------|---------|
+| `QUANTAGENT_BASE_URL` | Base URL of the running app (default `http://127.0.0.1:5000`). |
+| `QUANTAGENT_SMOKE_ANALYZE` | When `1` / `true` / `yes`, `/api/analyze` skips the trading graph after fetching OHLC (used by the runner script). |
+| `QUANTAGENT_PORT` / `PORT` | Listen port for `web_interface.py` (`QUANTAGENT_PORT` takes precedence over `PORT`). |
+| `QUANTAGENT_TEST_ASSET`, `QUANTAGENT_TEST_TIMEFRAME` | Asset and timeframe for the test (defaults include `GLD`, `5m`). |
+| `QUANTAGENT_EXPLICIT_END` | If set, the test unchecks “use current date & time for end” and fills end date/time (must not be in the future). |
+| `QUANTAGENT_ANALYZE_TIMEOUT_MS` | Max wait for `/api/analyze` when running the full pipeline (not needed for smoke mode). |
 
 
 ## 🔧 Implementation Details

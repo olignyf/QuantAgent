@@ -957,6 +957,17 @@ def analyze():
         if df.empty:
             return jsonify({"error": "No data available for the specified parameters"})
 
+        if os.environ.get("QUANTAGENT_SMOKE_ANALYZE", "").lower() in ("1", "true", "yes"):
+            return jsonify(
+                {
+                    "success": True,
+                    "smoke": True,
+                    "rows": int(len(df)),
+                    "asset": asset,
+                    "timeframe": timeframe,
+                }
+            )
+
         display_name = analyzer.asset_mapping.get(asset, asset)
         if display_name is None:
             display_name = asset
@@ -1302,4 +1313,5 @@ if __name__ == "__main__":
     static_dir = Path("static")
     static_dir.mkdir(exist_ok=True)
 
-    app.run(debug=True, host="127.0.0.1", port=5000)
+    port = int(os.environ.get("QUANTAGENT_PORT", os.environ.get("PORT", "5000")))
+    app.run(debug=True, host="127.0.0.1", port=port)
