@@ -1,6 +1,6 @@
 DEFAULT_CONFIG = {
-    "agent_llm_model": "qwen3.5:9b-150k",
-    "graph_llm_model": "qwen3.5:9b-150k",
+    "agent_llm_model": "qwen3.5:9b-120k",
+    "graph_llm_model": "qwen3.5:9b-120k",
     "agent_llm_provider": "ollama",  # "openai", "anthropic", "qwen", or "ollama"
     "graph_llm_provider": "ollama",
     "agent_llm_temperature": 0.1,

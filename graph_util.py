@@ -14,6 +14,62 @@ import color_style as color
 
 matplotlib.use("Agg")
 
+HIGH_RES_DPI = 600
+HIGH_RES_FIGSIZE = (24, 12)
+
+
+def _infer_bar_minutes(index: pd.DatetimeIndex) -> float:
+    if len(index) < 2:
+        return 60.0
+    deltas = pd.Series(index).diff().dropna().dt.total_seconds() / 60.0
+    if deltas.empty:
+        return 60.0
+    return float(deltas.median())
+
+
+def _apply_time_ticks(ax, index: pd.DatetimeIndex) -> None:
+    """Set readable time ticks without hitting Locator.MAXTICKS."""
+    if len(index) == 0:
+        return
+
+    bar_minutes = _infer_bar_minutes(index)
+
+    # Tick step in number of bars.
+    if bar_minutes <= 1.5:
+        step = 5     # 1m bars -> every 5m
+    elif bar_minutes <= 5.5:
+        step = 3     # 5m bars -> every 15m
+    elif bar_minutes <= 15.5:
+        step = 2     # 15m bars -> every 30m
+    elif bar_minutes <= 30.5:
+        step = 2     # 30m bars -> every 1h
+    elif bar_minutes <= 60.5:
+        step = 2     # 60m bars -> every 2h
+    elif bar_minutes <= 240.5:
+        step = 2     # 4h bars -> every 8h
+    elif bar_minutes <= 24 * 60 + 1:
+        step = 1
+    else:
+        step = 1
+
+    positions = np.arange(0, len(index), step, dtype=int)
+    if len(positions) == 0 or positions[-1] != len(index) - 1:
+        positions = np.append(positions, len(index) - 1)
+
+    labels = []
+    for pos in positions:
+        ts = index[pos]
+        if bar_minutes <= 240.5:
+            labels.append(ts.strftime("%m-%d %H:%M"))
+        else:
+            labels.append(ts.strftime("%Y-%m-%d"))
+
+    ax.set_xticks(positions)
+    ax.set_xticklabels(labels)
+    for label in ax.get_xticklabels():
+        label.set_rotation(30)
+        label.set_ha("right")
+
 
 # helper function for trending graph
 def check_trend_line(support: bool, pivot: int, slope: float, y: np.array):
@@ -222,29 +278,35 @@ class TechnicalTools:
             addplot=apds,
             alines=dict(alines=all_segments, colors=colors, linewidths=1),
             returnfig=True,
-            figsize=(12, 6),
+            figsize=HIGH_RES_FIGSIZE,
             block=False,
         )
 
         axlist[0].set_ylabel("Price", fontweight="normal")
         axlist[0].set_xlabel("Datetime", fontweight="normal")
+        _apply_time_ticks(axlist[0], candles.index)
+        axlist[0].legend(loc="upper left")
+        # mplfinance axes are not fully compatible with tight_layout.
+        fig.subplots_adjust(left=0.07, right=0.98, top=0.97, bottom=0.22)
 
         # save fig locally
         fig.savefig(
             "trend_graph.png",
             format="png",
-            dpi=600,
+            dpi=HIGH_RES_DPI,
             bbox_inches="tight",
             pad_inches=0.1,
         )
-        plt.close(fig)
-
-        # Add legend manually
-        axlist[0].legend(loc="upper left")
 
         # Save to base64
         buf = io.BytesIO()
-        fig.savefig(buf, format="png")
+        fig.savefig(
+            buf,
+            format="png",
+            dpi=HIGH_RES_DPI,
+            bbox_inches="tight",
+            pad_inches=0.1,
+        )
         buf.seek(0)
         img_b64 = base64.b64encode(buf.read()).decode("utf-8")
         plt.close(fig)
@@ -290,23 +352,31 @@ class TechnicalTools:
             df[["Open", "High", "Low", "Close"]],
             type="candle",
             style=color.my_color_style,
-            figsize=(12, 6),
+            figsize=HIGH_RES_FIGSIZE,
             returnfig=True,
             block=False,
         )
         axlist[0].set_ylabel("Price", fontweight="normal")
         axlist[0].set_xlabel("Datetime", fontweight="normal")
+        _apply_time_ticks(axlist[0], df.index)
+        # mplfinance axes are not fully compatible with tight_layout.
+        fig.subplots_adjust(left=0.07, right=0.98, top=0.97, bottom=0.22)
 
         fig.savefig(
             fname="kline_chart.png",
-            dpi=600,
+            dpi=HIGH_RES_DPI,
             bbox_inches="tight",
             pad_inches=0.1,
         )
-        plt.close(fig)
         # ---------- Encode to base64 -----------------
         buf = io.BytesIO()
-        fig.savefig(buf, format="png", dpi=600, bbox_inches="tight", pad_inches=0.1)
+        fig.savefig(
+            buf,
+            format="png",
+            dpi=HIGH_RES_DPI,
+            bbox_inches="tight",
+            pad_inches=0.1,
+        )
         plt.close(fig)  # release memory
 
         buf.seek(0)

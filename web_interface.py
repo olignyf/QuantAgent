@@ -750,7 +750,7 @@ class WebTradingAnalyzer:
                 api_key = os.environ.get("OLLAMA_API_KEY") or self.config.get(
                     "ollama_api_key", "ollama"
                 )
-                model = self.config.get("agent_llm_model", "qwen3.5:9b-150k")
+                model = self.config.get("agent_llm_model", "qwen3.5:9b-120k")
                 client = OpenAI(api_key=api_key, base_url=base_url)
                 _ = client.chat.completions.create(
                     model=model,
@@ -1144,8 +1144,8 @@ def update_provider():
             if (not gm.startswith("qwen")) or (":" in gm):
                 analyzer.config["graph_llm_model"] = "qwen3-vl-plus"
         elif provider == "ollama":
-            analyzer.config["agent_llm_model"] = "qwen3.5:9b-150k"
-            analyzer.config["graph_llm_model"] = "qwen3.5:9b-150k"
+            analyzer.config["agent_llm_model"] = "qwen3.5:9b-120k"
+            analyzer.config["graph_llm_model"] = "qwen3.5:9b-120k"
         else:
             # Set default OpenAI models if not already set to OpenAI models
             am = str(analyzer.config["agent_llm_model"])
