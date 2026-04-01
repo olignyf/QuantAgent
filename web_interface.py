@@ -11,6 +11,7 @@ import yfinance as yf
 from flask import Flask, jsonify, render_template, request, send_file
 from openai import OpenAI
 
+from default_config import DEFAULT_CONFIG
 import static_util
 from trading_graph import TradingGraph
 
@@ -20,7 +21,6 @@ app = Flask(__name__)
 class WebTradingAnalyzer:
     def __init__(self):
         """Initialize the web trading analyzer."""
-        from default_config import DEFAULT_CONFIG
         self.config = DEFAULT_CONFIG.copy()
         self.trading_graph = TradingGraph(config=self.config)
         self.data_dir = Path("data")
@@ -1144,8 +1144,8 @@ def update_provider():
             if (not gm.startswith("qwen")) or (":" in gm):
                 analyzer.config["graph_llm_model"] = "qwen3-vl-plus"
         elif provider == "ollama":
-            analyzer.config["agent_llm_model"] = "qwen3.5:9b-120k"
-            analyzer.config["graph_llm_model"] = "qwen3.5:9b-120k"
+            analyzer.config["agent_llm_model"] = DEFAULT_CONFIG["agent_llm_model"]
+            analyzer.config["graph_llm_model"] = DEFAULT_CONFIG["graph_llm_model"]
         else:
             # Set default OpenAI models if not already set to OpenAI models
             am = str(analyzer.config["agent_llm_model"])
